@@ -1,0 +1,336 @@
+---
+title: "Climate Patterns in World War II"
+author: "Samoil Gjorgiev 89231015"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    theme: cosmo
+    self-contained: true
+    code-fold: true
+    code-summary: "Show code"
+    fig-width: 9
+    fig-height: 5.5
+execute:
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(scales)
+```
+
+## Introduction
+
+Weather shaped WW2 more than most history books admit. The German advance on Moscow failed partly because of the winter of 1941–1942. D-Day was delayed by storms. Monsoons controlled the pace of the Pacific campaign.
+This project looks at what the actual daily weather data says about those years.
+
+The dataset comes from NOAA's Global Historical Climatology Network (GHCN), available on Kaggle [@kaggle_ww2weather]. It covers daily observations from land-based stations worldwide, 1940–1945.
+
+Questions:
+
+1. How did temperature and precipitation vary by season?
+2. Which years had the most extreme weather?
+3. How often were adverse weather phenomena recorded, and when?
+
+---
+
+## Data Presentation
+
+### Loading the Data
+
+```{r}
+f_to_c <- function(f) round((f - 32) * 5 / 9, 1)
+
+weather_raw <- read.csv("data/Summary of Weather.csv") |>
+  mutate(
+    Precip      = suppressWarnings(as.numeric(Precip)),
+    MaxTemp     = suppressWarnings(as.numeric(MaxTemp)),
+    MinTemp     = suppressWarnings(as.numeric(MinTemp)),
+    MeanTemp    = suppressWarnings(as.numeric(MeanTemp)),
+    Snowfall    = suppressWarnings(as.numeric(Snowfall)),
+    WindGustSpd = suppressWarnings(as.numeric(WindGustSpd)),
+    PoorWeather = as.character(PoorWeather)
+  )
+
+weather_raw |>
+  head(8) |> kable()
+```
+
+### Variable Descriptions
+
+```{r}
+tibble(
+  Column = names(weather_raw),
+  Type   = map_chr(weather_raw, \(x) class(x)[1])
+) |>
+  mutate(Description = case_when(
+    Column == "STA"         ~ "Station ID (WBAN number)",
+    Column == "Date"        ~ "Date (YYYY-MM-DD)",
+    Column == "Precip"      ~ "Total precipitation (inches)",
+    Column == "WindGustSpd" ~ "Max wind gust speed (knots)",
+    Column == "MaxTemp"     ~ "Max temperature (°F raw, converted to °C)",
+    Column == "MinTemp"     ~ "Min temperature (°F raw, converted to °C)",
+    Column == "MeanTemp"    ~ "Mean temperature (°F raw, converted to °C)",
+    Column == "Snowfall"    ~ "Snowfall (inches)",
+    Column == "PoorWeather" ~ "Weather phenomena flags (TSHDSBRSGF): T=Thunder, S=Snow, H=Hail, D=Dust, B=Blowing snow, R=Rain, G=Fog, F=Freezing rain — empty means none observed",
+    TRUE                    ~ "Other variable"
+  )) |> kable()
+```
+
+Temperatures are in °F in the raw file converted to °C after loading. Precip and snowfall in inches. Wind in knots. `PoorWeather` is a string of phenomenon flags from the TSHDSBRSGF coding system each letter present indicates that condition was observed that day. An empty or NA value means no adverse phenomena were recorded.
+
+---
+
+## Data Transformation
+
+```{r}
+classify_temp <- function(temp_c) {
+  case_when(
+    temp_c <= 0  ~ "Freezing (≤ 0°C)",
+    temp_c >= 35 ~ "Extreme heat (≥ 35°C)",
+    TRUE         ~ "Normal"
+  )
+}
+#helper
+has_phenomenon <- function(x) !is.na(x) & trimws(x) != "" & x != "0"
+
+weather <- weather_raw |>
+  mutate(
+    Date           = as.Date(Date),
+    Year           = year(Date),
+    Month          = month(Date),
+    MonthLabel     = month(Date, label = TRUE, abbr = TRUE),
+    Season         = case_when(
+      Month %in% c(12, 1, 2) ~ "Winter",
+      Month %in% c(3, 4, 5)  ~ "Spring",
+      Month %in% c(6, 7, 8)  ~ "Summer",
+      TRUE                    ~ "Autumn"
+    ),
+    Season         = factor(Season, levels = c("Winter", "Spring", "Summer", "Autumn")),
+    MaxTemp_C      = f_to_c(MaxTemp),
+    MinTemp_C      = f_to_c(MinTemp),
+    MeanTemp_C     = f_to_c(MeanTemp),
+    TempRange_C    = MaxTemp_C - MinTemp_C,
+    HeavyRain      = Precip >= 1,
+    FreezingDay    = MinTemp_C <= 0,
+    TempClass      = classify_temp(MeanTemp_C),
+    AdversWeather  = has_phenomenon(PoorWeather),
+    # extract specific phenomena
+    HasThunder     = str_detect(PoorWeather, "T"),
+    HasFog         = str_detect(PoorWeather, "G"),
+    HasSnowEvent   = str_detect(PoorWeather, "S"),
+    HasRain        = str_detect(PoorWeather, "R")
+  ) |>
+  filter(Year >= 1940, Year <= 1945)
+```
+
+### Annual Summary
+
+```{r}
+table_annual <- weather |>
+  filter(!is.na(MeanTemp_C), !is.na(Precip)) |>
+  group_by(Year) |>
+  summarise(
+    Mean_Temp_C     = round(mean(MeanTemp_C, na.rm = TRUE), 1),
+    Mean_Max_C      = round(mean(MaxTemp_C,  na.rm = TRUE), 1),
+    Mean_Min_C      = round(mean(MinTemp_C,  na.rm = TRUE), 1),
+    Total_Precip_in = round(sum(Precip,      na.rm = TRUE), 1),
+    Freezing_Days   = sum(FreezingDay,        na.rm = TRUE),
+    Stations        = n_distinct(STA),
+    .groups = "drop"
+  )
+
+year_labels <- table_annual |>
+  select(Year, Mean_Temp_C) |>
+  mutate(Year_Type = if_else(Mean_Temp_C < mean(Mean_Temp_C), "Cold year", "Warm year"))
+
+table_annual |>
+  kable(
+    col.names = c("Year", "Mean (°C)", "Max (°C)", "Min (°C)",
+                  "Total Precip (in)", "Freezing Days", "Stations")
+  )
+```
+
+1941 and 1942 have the most freezing days and lowest mean temperatures matches the historically brutal winters on the Eastern Front. Station count grows each year as the Allies expanded and set up new weather posts.
+
+### By Season
+
+```{r}
+weather |>
+  filter(!is.na(MeanTemp_C), !is.na(Precip)) |>
+  group_by(Season) |>
+  summarise(
+    Mean_Temp_C     = round(mean(MeanTemp_C, na.rm = TRUE), 1),
+    SD_Temp         = round(sd(MeanTemp_C,   na.rm = TRUE), 1),
+    Mean_Precip_in  = round(mean(Precip,     na.rm = TRUE), 3),
+    Heavy_Rain_Days = sum(HeavyRain,         na.rm = TRUE),
+    Snowfall_Days   = sum(Snowfall > 0,       na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  kable(
+    col.names = c("Season", "Mean Temp (°C)", "SD", "Mean Precip (in)",
+                  "Heavy Rain Days", "Snow Days")
+  )
+```
+
+Winter has the lowest temperatures and most snow days. High SD reflects the mix of stations a mild Atlantic winter and a Russian one are very different. Summer gets the most heavy rain, mostly from Pacific stations in monsoon regions.
+
+### Adverse Weather Phenomena by Year and Season
+
+```{r}
+weather |>
+  filter(!is.na(MeanTemp_C)) |>
+  group_by(Year, Season) |>
+  summarise(
+    Freezing_Days    = sum(FreezingDay,    na.rm = TRUE),
+    ExtremeHeat_Days = sum(MaxTemp_C >= 35, na.rm = TRUE),
+    Adverse_Days     = sum(AdversWeather,  na.rm = TRUE),
+    Thunder_Days     = sum(HasThunder,     na.rm = TRUE),
+    Fog_Days         = sum(HasFog,         na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  inner_join(year_labels, by = "Year") |>
+  arrange(Year, Season) |>
+  kable(
+    col.names = c("Year", "Season", "Freezing Days", "Extreme Heat Days",
+                  "Adverse Weather Days", "Thunder Days", "Fog Days",
+                  "Mean Temp (°C)", "Year Type"))
+```
+
+`inner_join` adds the year classification from Table 1. Freezing days peak in Winter 1941–1942. Fog days are the most operationally relevant for air forces fog grounded aircraft more reliably than almost anything else. Thunder and extreme heat are concentrated in Summer.
+
+---
+
+## Exploratory Data Analysis
+
+### Monthly Temperature by Year
+
+```{r}
+weather |>
+  filter(!is.na(MeanTemp_C)) |>
+  group_by(Year, Month) |>
+  summarise(Mean_Temp = mean(MeanTemp_C, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = Month, y = Mean_Temp, colour = factor(Year), group = Year))+
+  geom_line(linewidth = 1)+
+  geom_point(size = 2.2)+
+  scale_x_continuous(breaks = 1:12, labels = month.abb)+
+  scale_colour_brewer(palette = "Set2")+
+  labs(
+    title   = "Monthly mean temperature by year (1940–1945)",
+    x = "Month", y = "Mean temperature (°C)", colour = "Year")+
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+All years follow the same seasonal curve. Summers cluster tightly stable across the war. Winters spread out, with 1941 and 1942 clearly lower than the rest.
+
+### Temperature Distribution by Season
+
+```{r}
+    weather |>
+    filter(!is.na(MeanTemp_C)) |>
+    ggplot(aes(x = Season, y = MeanTemp_C, fill = Season))+
+    geom_boxplot(outlier.alpha = 0.15, outlier.size = 0.7, width = 0.5)+
+    scale_fill_manual(values = c("Winter"="#6BAED6","Spring"="#74C476",
+                                    "Summer"="#FD8D3C","Autumn"="#FDAE6B"))+
+    scale_y_continuous(breaks = seq(-40, 50, 10))+
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5)+
+    annotate("text", x = 0.55, y = 1.5, label = "0°C (freezing)",
+            size = 3.2, colour = "grey40", hjust = 0)+
+    labs(title = "Temperature distribution by season (1940–1945)",
+        x = NULL, y = "Mean temperature (°C)")+
+    theme_minimal(base_size = 13)+
+    theme(legend.position = "none", plot.title = element_text(face = "bold"),
+            panel.grid.major.x = element_blank())
+```
+
+Winter has the widest spread and lowest outliers well below −20°C in some stations. A large part of the winter box sits below 0°C. Summer is tight and warm with almost nothing below freezing.
+
+### Adverse Weather Days by Year and Season
+
+```{r}
+weather |>
+  group_by(Year, Season) |>
+  summarise(Adverse_Days = sum(AdversWeather, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = factor(Year), y = Adverse_Days, fill = Season))+
+  geom_col(width = 0.65)+
+  scale_fill_manual(values = c("Winter"="#6BAED6","Spring"="#74C476",
+                                "Summer"="#FD8D3C","Autumn"="#FDAE6B"))+
+  scale_y_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.05)))+
+  labs(title = "Days with adverse weather phenomena per year by season",
+       subtitle = "Adverse = any TSHDSBRSGF phenomenon recorded (thunder, fog, snow, rain, etc.)",
+       x = "Year", y = "Adverse weather days (all stations)", fill = "Season",)+
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+```
+
+Total grows each year as more stations came online. Winter and Autumn dominate fog, snow events, and freezing rain were far more common in those seasons, which directly affected air operations over Europe.
+
+### Temperature Heatmap
+
+```{r}
+weather |>
+  filter(!is.na(MeanTemp_C)) |>
+  group_by(Year, Month) |>
+  summarise(Mean_Temp = mean(MeanTemp_C, na.rm = TRUE), .groups = "drop") |>
+  mutate(MonthLabel = month(Month, label = TRUE, abbr = TRUE)) |>
+  ggplot(aes(x = factor(Year), y = fct_rev(MonthLabel), fill = Mean_Temp))+
+  geom_tile(colour = "white", linewidth = 0.5)+
+  geom_text(aes(label = round(Mean_Temp, 1)), size = 3.2, colour = "white", fontface = "bold")+
+  scale_fill_gradient2(low = "#2166AC", mid = "#F7F7F7", high = "#D6604D",
+                       midpoint = 10, name = "°C")+
+  labs(title = "Mean temperature heatmap by month and year (°C)",
+       x = "Year", y = "Month")+
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(face = "bold"), panel.grid = element_blank())
+```
+
+The whole picture at once. Deep blue in January–February 1941 and 1942 stands out coldest period in the dataset. Summer reds are consistent across all years.
+
+### Temperature Range vs Precipitation
+
+```{r}
+weather |>
+  filter(!is.na(TempRange_C), !is.na(Precip), Precip < 5) |>
+  sample_n(8000) |>
+  ggplot(aes(x = Precip, y = TempRange_C, colour = Season))+
+  geom_point(alpha = 0.35, size = 1.2)+
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1)+
+  scale_colour_manual(values = c("Winter"="#6BAED6","Spring"="#74C476",
+                                  "Summer"="#FD8D3C","Autumn"="#FDAE6B"))+
+  facet_wrap(~Season, nrow = 2)+
+  labs(title = "Daily temperature range vs precipitation by season",
+       subtitle = "Random sample of 8,000 station-day observations",
+       x = "Precipitation (inches)", y = "Temp range (°C, max − min)")+
+  theme_minimal(base_size = 13)+
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "none", strip.text = element_text(face = "bold"))
+```
+
+Rainy days tend to have a smaller gap between daily high and low cloud cover insulates. The trend lines show a slight negative relationship in every season. Winter is the noisiest because "winter" covers very different climates depending on the station.
+
+---
+
+## Conclusion
+
+1941 and 1942 were clearly the most extreme years most freezing days, lowest temperatures, most adverse weather events. This lines up directly with the turning points of the war on the Eastern Front.
+
+Seasonality drove everything else. Winter and Autumn were consistently the hardest months for operations fog, snow, and freezing rain were far more frequent. Summer was stable and relatively clear across all six years.
+
+The scatter plot shows that heavy rain compresses the daily temperature range useful for anyone planning operations that depend on both visibility and ground conditions at the same time.
+
+---
+
+## References
+
+::: {#refs}
+:::
